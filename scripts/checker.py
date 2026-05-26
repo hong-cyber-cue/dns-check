@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-DNS 封鎖檢測腳本
+DNS 封鎖檢測腳本 v2.1
 透過 Tailscale + SOCKS5 從各 ISP 的手機網路出去，檢測域名是否被 DNS 污染
+
+核心原理：
+  SOCKS5 協議支持讓代理端（手機）解析域名。
+  當我們透過 SOCKS5 連 domain:443 時，手機會用 ISP 預設 DNS 解析。
+  如果 ISP 污染了 DNS → 手機解析到假 IP → TCP 連到假 IP → getpeername() 拿到假 IP
+  如果 ISP 沒污染 → 手機解析到真 IP → TCP 連到真 IP → getpeername() 拿到真 IP
+  然後跟 VPS 端直接透過 DoH 查到的真 IP 比對 ASN，就能判斷是否被封。
 """
 
 import asyncio
@@ -70,7 +77,6 @@ def init_db(db_path: str):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_time ON results(check_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_isp ON results(domain, isp)")
     
-    # 狀態變化記錄表（用來判斷是否要發告警）
     conn.execute("""
         CREATE TABLE IF NOT EXISTS state_changes (
             domain TEXT,
@@ -86,54 +92,42 @@ def init_db(db_path: str):
 
 # ============ DNS 查詢核心 ============
 
-async def query_isp_dns_via_socks5(
+def query_isp_dns_via_socks5(
     domain: str,
     isp_dns_ip: str,
     socks5_host: str,
     socks5_port: int,
-    timeout: int = 5
+    timeout: int = 10
 ) -> Optional[list[str]]:
     """
-    透過手機 SOCKS5 代理，向 ISP 的預設 DNS 伺服器查詢域名
-    使用隨機 source port 避免快取
-    """
-    # 用隨機子域名前綴可選，但這裡先查真實域名（玩家實際遇到的）
-    query = dns.message.make_query(domain, dns.rdatatype.A)
+    透過手機 SOCKS5 代理查詢域名的 IP。
     
-    # 透過 SOCKS5 走 DNS-over-TCP（UDP 走 SOCKS5 比較麻煩，TCP 比較通用）
+    原理：SOCKS5 connect 時傳入域名（不是 IP），
+    代理端（手機）會用自己的系統 DNS（ISP 預設 DNS）來解析。
+    連線建立後用 getpeername() 拿到手機解析到的 IP。
+    
+    如果 ISP 污染了 DNS → getpeername() 回假 IP
+    如果 ISP 沒污染 → getpeername() 回真 IP
+    """
     try:
         sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
         sock.set_proxy(socks.SOCKS5, socks5_host, socks5_port)
         sock.settimeout(timeout)
-        sock.connect((isp_dns_ip, 53))
-        
-        # DNS over TCP: 前 2 bytes 是長度
-        wire = query.to_wire()
-        sock.sendall(struct.pack("!H", len(wire)) + wire)
-        
-        # 讀回應
-        length_data = sock.recv(2)
-        if len(length_data) < 2:
-            return None
-        length = struct.unpack("!H", length_data)[0]
-        
-        response_data = b""
-        while len(response_data) < length:
-            chunk = sock.recv(length - len(response_data))
-            if not chunk:
-                break
-            response_data += chunk
+        # 關鍵：傳入域名讓手機端解析（不是我們自己解析）
+        sock.connect((domain, 443))
+        # 拿到手機端解析後連到的真實 IP
+        peer_ip = sock.getpeername()[0]
         sock.close()
-        
-        response = dns.message.from_wire(response_data)
-        ips = []
-        for rrset in response.answer:
-            if rrset.rdtype == dns.rdatatype.A:
-                for item in rrset.items:
-                    ips.append(item.address)
-        return ips if ips else None
+        return [peer_ip]
+    except socks.SOCKS5Error as e:
+        # SOCKS5 代理回報錯誤（例如域名解析失敗）
+        log.debug(f"SOCKS5 error for {domain}: {e}")
+        return None
+    except socket.timeout:
+        log.debug(f"Timeout connecting to {domain} via SOCKS5")
+        return None
     except Exception as e:
-        log.debug(f"ISP DNS query failed for {domain} via {socks5_host}:{socks5_port}: {e}")
+        log.debug(f"SOCKS5 connect failed for {domain}: {e}")
         return None
 
 
@@ -161,16 +155,14 @@ async def query_real_ip_via_doh(domain: str) -> Optional[list[str]]:
 
 # ============ ASN 查詢 ============
 
-# 簡易 ASN 快取
 _asn_cache: dict[str, int] = {}
 
 
 async def lookup_asn(ip: str) -> Optional[int]:
-    """查 IP 的 ASN 號碼。用 Team Cymru 的 whois DNS 服務（免費、不限速）"""
+    """查 IP 的 ASN 號碼。用 Team Cymru 的 whois DNS 服務"""
     if ip in _asn_cache:
         return _asn_cache[ip]
     
-    # IP 反轉：1.2.3.4 → 4.3.2.1.origin.asn.cymru.com
     try:
         parts = ip.split(".")
         if len(parts) != 4:
@@ -178,7 +170,6 @@ async def lookup_asn(ip: str) -> Optional[int]:
         reversed_ip = ".".join(reversed(parts))
         query_name = f"{reversed_ip}.origin.asn.cymru.com"
         
-        # 直接從 VPS 查（這個查詢不需要走手機）
         query = dns.message.make_query(query_name, dns.rdatatype.TXT)
         response = await asyncio.to_thread(
             dns.query.udp, query, "1.1.1.1", timeout=5
@@ -186,7 +177,6 @@ async def lookup_asn(ip: str) -> Optional[int]:
         
         for rrset in response.answer:
             for item in rrset.items:
-                # 格式："13335 | 1.1.1.0/24 | US | arin | ..."
                 txt = item.to_text().strip('"').split("|")[0].strip()
                 asn = int(txt.split()[0])
                 _asn_cache[ip] = asn
@@ -202,7 +192,6 @@ def is_obviously_blocked_ip(ip: str) -> bool:
     """明顯的封鎖 IP 樣式"""
     if ip in ("0.0.0.0", "127.0.0.1", "127.0.0.53"):
         return True
-    # 內網 IP
     if ip.startswith(("10.", "192.168.", "172.")):
         return True
     return False
@@ -213,8 +202,9 @@ async def check_one(domain: str, isp_cfg: dict) -> dict:
     start = time.time()
     isp_name = isp_cfg["name"]
     
-    # 1. 透過手機 SOCKS5 向 ISP DNS 查
-    isp_ips = await query_isp_dns_via_socks5(
+    # 1. 透過手機 SOCKS5 連線，讓手機的 ISP DNS 解析域名
+    isp_ips = await asyncio.to_thread(
+        query_isp_dns_via_socks5,
         domain,
         isp_cfg["isp_dns"],
         isp_cfg["socks5_host"],
@@ -238,7 +228,7 @@ async def check_one(domain: str, isp_cfg: dict) -> dict:
     # 2. 判斷 ISP DNS 結果
     if not isp_ips:
         result["status"] = "blocked"
-        result["reason"] = "DNS_NO_ANSWER"
+        result["reason"] = "CONNECT_FAIL"
         return result
     
     isp_ip = isp_ips[0]
@@ -252,7 +242,6 @@ async def check_one(domain: str, isp_cfg: dict) -> dict:
     # 3. 查真實 IP 對照
     real_ips = await query_real_ip_via_doh(domain)
     if not real_ips:
-        # 真實 IP 查不到，無法判斷，標 unknown
         result["status"] = "unknown"
         result["reason"] = "REAL_DNS_FAIL"
         return result
@@ -260,15 +249,13 @@ async def check_one(domain: str, isp_cfg: dict) -> dict:
     real_ip = real_ips[0]
     result["real_resolved_ip"] = real_ip
     
-    # 4. ASN 比對（同 ASN 視為正常，跨 ASN 視為污染）
+    # 4. ASN 比對
     isp_asn = await lookup_asn(isp_ip)
     real_asn = await lookup_asn(real_ip)
     result["isp_resolved_asn"] = isp_asn
     result["real_resolved_asn"] = real_asn
     
     if isp_asn is None or real_asn is None:
-        # ASN 查不到，退而求其次比 IP 是否在合理範圍
-        # 如果 ISP 解析到的 IP 跟真實 IP 一樣 → 正常
         if set(isp_ips) & set(real_ips):
             result["status"] = "ok"
             result["reason"] = "IP_MATCH"
@@ -310,7 +297,7 @@ def save_result(db_path: str, result: dict):
 
 
 def check_state_change(db_path: str, result: dict) -> Optional[str]:
-    """檢查狀態是否變化，返回變化描述（沒變化返回 None）"""
+    """檢查狀態是否變化"""
     conn = sqlite3.connect(db_path)
     cur = conn.execute(
         "SELECT last_status FROM state_changes WHERE domain=? AND isp=?",
@@ -320,7 +307,6 @@ def check_state_change(db_path: str, result: dict) -> Optional[str]:
     current = result["status"]
     
     if row is None:
-        # 第一次記錄，不發告警
         conn.execute(
             "INSERT INTO state_changes (domain, isp, last_status, changed_at) VALUES (?, ?, ?, ?)",
             (result["domain"], result["isp"], current, result["check_time"])
@@ -334,7 +320,6 @@ def check_state_change(db_path: str, result: dict) -> Optional[str]:
         conn.close()
         return None
     
-    # 狀態變化
     conn.execute(
         "UPDATE state_changes SET last_status=?, changed_at=? WHERE domain=? AND isp=?",
         (current, result["check_time"], result["domain"], result["isp"])
@@ -348,9 +333,9 @@ def check_state_change(db_path: str, result: dict) -> Optional[str]:
 # ============ 主迴圈 ============
 
 async def run_round(cfg: dict, domains: list[str]):
-    """跑一輪檢測：所有域名 × 所有 ISP"""
+    """跑一輪檢測"""
     db_path = cfg["db_path"]
-    interval_ms = cfg.get("between_check_ms", 200)
+    interval_ms = cfg.get("between_check_ms", 300)
     
     log.info(f"開始檢測：{len(domains)} 域名 × {len(cfg['isps'])} ISP")
     
@@ -361,7 +346,6 @@ async def run_round(cfg: dict, domains: list[str]):
                 result = await check_one(domain, isp_cfg)
                 save_result(db_path, result)
                 
-                # 狀態變化偵測
                 change = check_state_change(db_path, result)
                 if change and cfg.get("telegram_enabled"):
                     msg = (
@@ -391,7 +375,6 @@ async def main():
     cfg = load_config()
     init_db(cfg["db_path"])
     
-    # 載入域名清單
     domains_file = Path(__file__).parent.parent / cfg["domains_file"]
     with open(domains_file) as f:
         domains = [line.strip() for line in f if line.strip() and not line.startswith("#")]
