@@ -442,73 +442,76 @@ async def run_round(cfg: dict, domains: list[str]):
 
 
 async def send_round_report(cfg: dict, results: list[dict]):
-    """推送本輪完整狀態報告到 Telegram，自動分段避免超過 4096 字元限制"""
+    """推送本輪完整狀態報告到 Telegram，分三類：被封、無記錄、正常"""
     from datetime import datetime
     
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     
-    # 統計
-    total = len(results)
-    ok_count = sum(1 for r in results if r["status"] == "ok")
-    blocked_count = sum(1 for r in results if r["status"] == "blocked")
-    unknown_count = sum(1 for r in results if r["status"] in ("unknown", "suspect"))
-    
-    # 第 1 條：統計摘要 + 被封域名詳情
+    # 分類
     blocked = [r for r in results if r["status"] == "blocked"]
     unknown = [r for r in results if r["status"] in ("unknown", "suspect")]
+    ok_list = [r for r in results if r["status"] == "ok"]
     
+    total = len(results)
+    
+    # 第 1 條：摘要 + 被封域名
     lines = [
         f"📊 DNS 檢測報告",
         f"⏰ {now}",
-        f"",
-        f"📈 統計：✅{ok_count}  🔴{blocked_count}  ⚪{unknown_count}  共{total}項",
+        f"📈 統計：✅{len(ok_list)}  🔴{len(blocked)}  ⚪{len(unknown)}  共{total}項",
     ]
     
     if blocked:
         lines.append("")
-        lines.append("⚠️ 被封域名：")
+        lines.append(f"⚠️ 被封域名（{len(blocked)}）：")
         for r in blocked:
-            lines.append(f"  🔴 {r['domain']} @ {r['isp']}")
-            if r.get("real_resolved_ip"):
-                lines.append(f"     真實IP: {r['real_resolved_ip']}")
+            lines.append(f"🔴 {r['domain']}")
     else:
         lines.append("")
         lines.append("✅ 沒有域名被封鎖")
     
     if unknown:
         lines.append("")
-        lines.append("⚪ 無記錄域名：")
+        lines.append(f"⚪ 無記錄域名（{len(unknown)}）：")
         for r in unknown:
-            lines.append(f"  {r['domain']}")
+            lines.append(f"⚪ {r['domain']}")
     
-    await send_alert(cfg, "\n".join(lines), force=True)
+    msg1 = "\n".join(lines)
+    # 如果第一條太長也要拆
+    if len(msg1) > 4000:
+        # 先發摘要
+        await send_alert(cfg, "\n".join(lines[:4]), force=True)
+        await asyncio.sleep(0.3)
+        # 再發被封清單
+        if blocked:
+            blocked_lines = [f"⚠️ 被封域名（{len(blocked)}）："]
+            for r in blocked:
+                blocked_lines.append(f"🔴 {r['domain']}")
+            await send_alert(cfg, "\n".join(blocked_lines), force=True)
+            await asyncio.sleep(0.3)
+        if unknown:
+            unknown_lines = [f"⚪ 無記錄域名（{len(unknown)}）："]
+            for r in unknown:
+                unknown_lines.append(f"⚪ {r['domain']}")
+            await send_alert(cfg, "\n".join(unknown_lines), force=True)
+            await asyncio.sleep(0.3)
+    else:
+        await send_alert(cfg, msg1, force=True)
+        await asyncio.sleep(0.3)
     
-    # 第 2 條起：完整域名清單，分段發送
-    icon = {"ok": "✅", "blocked": "🔴", "unknown": "⚪", "suspect": "🟡"}
-    
-    by_isp = {}
-    for r in results:
-        by_isp.setdefault(r["isp"], []).append(r)
-    
-    for isp_name, isp_results in by_isp.items():
-        country = isp_results[0]["country"]
-        
-        # 每 50 個域名一段
-        chunks = [isp_results[i:i+50] for i in range(0, len(isp_results), 50)]
-        
+    # 第 2 條起：正常域名清單，分段發送
+    if ok_list:
+        chunks = [ok_list[i:i+50] for i in range(0, len(ok_list), 50)]
         for idx, chunk in enumerate(chunks):
             chunk_lines = []
             if idx == 0:
-                chunk_lines.append(f"━━ {isp_name} ({country}) ━━")
+                chunk_lines.append(f"✅ 正常域名（{len(ok_list)}）：")
             else:
-                chunk_lines.append(f"━━ {isp_name} 續 ({idx+1}/{len(chunks)}) ━━")
-            
+                chunk_lines.append(f"✅ 正常域名 續 ({idx+1}/{len(chunks)})：")
             for r in chunk:
-                s = icon.get(r["status"], "❓")
-                chunk_lines.append(f"{s} {r['domain']}")
-            
+                chunk_lines.append(f"✅ {r['domain']}")
             await send_alert(cfg, "\n".join(chunk_lines), force=True)
-            await asyncio.sleep(0.5)  # 避免 Telegram rate limit
+            await asyncio.sleep(0.5)
 
 
 async def main():
