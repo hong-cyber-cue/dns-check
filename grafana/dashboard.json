@@ -1,0 +1,359 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "DNS 封鎖檢測 - 跨電信商域名狀態監控",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "description": "目前所有域名 × ISP 的最新狀態",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": { "align": "center", "displayMode": "color-background", "inspect": false },
+          "mappings": [
+            { "options": { "ok": { "color": "green", "index": 0, "text": "✓ OK" } }, "type": "value" },
+            { "options": { "blocked": { "color": "red", "index": 1, "text": "✗ BLOCKED" } }, "type": "value" },
+            { "options": { "unknown": { "color": "dark-gray", "index": 2, "text": "? UNKNOWN" } }, "type": "value" },
+            { "options": { "suspect": { "color": "yellow", "index": 3, "text": "! SUSPECT" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT domain, MAX(CASE WHEN isp='Viettel' THEN status END) as Viettel, MAX(CASE WHEN isp='Vinaphone' THEN status END) as Vinaphone, MAX(CASE WHEN isp='Mobifone' THEN status END) as Mobifone, MAX(CASE WHEN isp='Globe' THEN status END) as Globe, MAX(CASE WHEN isp='Smart' THEN status END) as Smart, MAX(CASE WHEN isp='DITO' THEN status END) as DITO FROM results r1 WHERE check_time = (SELECT MAX(check_time) FROM results r2 WHERE r2.domain=r1.domain AND r2.isp=r1.isp) GROUP BY domain ORDER BY domain",
+          "queryType": "table",
+          "rawQueryText": "SELECT domain, MAX(CASE WHEN isp='Viettel' THEN status END) as Viettel, MAX(CASE WHEN isp='Vinaphone' THEN status END) as Vinaphone, MAX(CASE WHEN isp='Mobifone' THEN status END) as Mobifone, MAX(CASE WHEN isp='Globe' THEN status END) as Globe, MAX(CASE WHEN isp='Smart' THEN status END) as Smart, MAX(CASE WHEN isp='DITO' THEN status END) as DITO FROM results r1 WHERE check_time = (SELECT MAX(check_time) FROM results r2 WHERE r2.domain=r1.domain AND r2.isp=r1.isp) GROUP BY domain ORDER BY domain",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "📊 域名 × ISP 狀態矩陣（最新）",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "description": "每個 ISP 當前的封鎖比例",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 30 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT isp, ROUND(100.0 * SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) / COUNT(*), 1) as block_pct FROM (SELECT r1.* FROM results r1 INNER JOIN (SELECT domain, isp, MAX(check_time) as mt FROM results GROUP BY domain, isp) latest ON r1.domain=latest.domain AND r1.isp=latest.isp AND r1.check_time=latest.mt) GROUP BY isp ORDER BY isp",
+          "queryType": "table",
+          "rawQueryText": "SELECT isp, ROUND(100.0 * SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) / COUNT(*), 1) as block_pct FROM (SELECT r1.* FROM results r1 INNER JOIN (SELECT domain, isp, MAX(check_time) as mt FROM results GROUP BY domain, isp) latest ON r1.domain=latest.domain AND r1.isp=latest.isp AND r1.check_time=latest.mt) GROUP BY isp ORDER BY isp",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "📈 各 ISP 封鎖率",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "description": "整體封鎖率隨時間變化",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "封鎖率 (%)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 3,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT (check_time / 3600) * 3600 as time, isp, ROUND(100.0 * SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) / COUNT(*), 1) as block_pct FROM results WHERE check_time > strftime('%s', 'now', '-7 days') GROUP BY (check_time / 3600), isp ORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT (check_time / 3600) * 3600 as time, isp, ROUND(100.0 * SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) / COUNT(*), 1) as block_pct FROM results WHERE check_time > strftime('%s', 'now', '-7 days') GROUP BY (check_time / 3600), isp ORDER BY time",
+          "refId": "A",
+          "timeColumns": ["time"]
+        }
+      ],
+      "title": "📉 封鎖率趨勢（過去 7 天，每小時）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "description": "最近 24 小時哪些域名變紅 / 變綠了",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": { "align": "auto", "displayMode": "auto", "inspect": false },
+          "mappings": [
+            { "options": { "blocked": { "color": "red", "index": 0 } }, "type": "value" },
+            { "options": { "ok": { "color": "green", "index": 1 } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "time" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "status" }, "properties": [{ "id": "custom.displayMode", "value": "color-background" }, { "id": "custom.width", "value": 100 }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT datetime(check_time, 'unixepoch', '+8 hours') as time, domain, isp, status, reason, isp_resolved_ip FROM results WHERE check_time > strftime('%s', 'now', '-24 hours') AND id IN (SELECT MIN(id) FROM results r2 WHERE r2.domain=results.domain AND r2.isp=results.isp AND r2.status != (SELECT status FROM results r3 WHERE r3.domain=r2.domain AND r3.isp=r2.isp AND r3.check_time < r2.check_time ORDER BY check_time DESC LIMIT 1) GROUP BY r2.domain, r2.isp, r2.status) ORDER BY check_time DESC LIMIT 50",
+          "queryType": "table",
+          "rawQueryText": "SELECT datetime(check_time, 'unixepoch', '+8 hours') as time, domain, isp, status, reason, isp_resolved_ip FROM results WHERE check_time > strftime('%s', 'now', '-24 hours') ORDER BY check_time DESC LIMIT 50",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "🚨 最近 24 小時狀態變化",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "description": "整體統計",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 30 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT COUNT(DISTINCT domain) as 域名總數 FROM results",
+          "queryType": "table",
+          "rawQueryText": "SELECT COUNT(DISTINCT domain) as domains FROM results",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "監測中域名數",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 30 },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT COUNT(DISTINCT isp) as ISP數量 FROM results",
+          "queryType": "table",
+          "rawQueryText": "SELECT COUNT(DISTINCT isp) FROM results",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "監測中 ISP 數",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "description": "距離上次檢測的分鐘數",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 120 }
+            ]
+          },
+          "unit": "m"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 30 },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT CAST((strftime('%s', 'now') - MAX(check_time)) / 60 AS INTEGER) as 分鐘前 FROM results",
+          "queryType": "table",
+          "rawQueryText": "SELECT (strftime('%s','now') - MAX(check_time))/60 FROM results",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "上次檢測",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 15 },
+              { "color": "red", "value": 30 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 30 },
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "${DS_SQLITE}" },
+          "queryText": "SELECT ROUND(100.0 * SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) / COUNT(*), 1) as 整體封鎖率 FROM (SELECT r1.* FROM results r1 INNER JOIN (SELECT domain, isp, MAX(check_time) as mt FROM results GROUP BY domain, isp) latest ON r1.domain=latest.domain AND r1.isp=latest.isp AND r1.check_time=latest.mt)",
+          "queryType": "table",
+          "rawQueryText": "SELECT ROUND(100.0 * SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) / COUNT(*), 1) FROM results",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "整體封鎖率",
+      "type": "stat"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["dns", "monitoring"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "Asia/Taipei",
+  "title": "DNS 封鎖檢測面板",
+  "uid": "dns-block-monitor",
+  "version": 1,
+  "weekStart": ""
+}

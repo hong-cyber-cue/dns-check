@@ -1,0 +1,11 @@
+[Unit]
+Description=DNS Checker Health Check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dnscheck
+WorkingDirectory=/home/dnscheck/dns-check
+ExecStart=/home/dnscheck/dns-check/venv/bin/python scripts/health_check.py
+StandardOutput=append:/var/log/dnscheck/health.log
+StandardError=append:/var/log/dnscheck/health.log

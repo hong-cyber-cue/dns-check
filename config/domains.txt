@@ -1,0 +1,19 @@
+# 要檢測的域名清單（每行一個，# 開頭視為註解）
+# 不要含 https:// 或路徑，只要域名本身
+
+# === Vietnam 市場 ===
+pbv88.com
+pbv88.net
+mvpviva.com
+mvpviva.net
+
+# === Philippines 市場 ===
+panalobet.com
+panalobet.net
+
+# === Bangladesh 市場 ===
+pbc88.com
+pbc88.delivery
+pbc88.cheap
+pbc88.icu
+pbc88.beer

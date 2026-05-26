@@ -1,0 +1,18 @@
+[Unit]
+Description=DNS Block Checker
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dnscheck
+WorkingDirectory=/home/dnscheck/dns-check
+Environment="PATH=/home/dnscheck/dns-check/venv/bin:/usr/bin"
+ExecStart=/home/dnscheck/dns-check/venv/bin/python scripts/checker.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/var/log/dnscheck/output.log
+StandardError=append:/var/log/dnscheck/error.log
+
+[Install]
+WantedBy=multi-user.target

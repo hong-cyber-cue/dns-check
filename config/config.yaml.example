@@ -1,0 +1,67 @@
+# DNS 封鎖檢測設定
+# 注意：socks5_host 用 Tailscale 分配給每台手機的 100.x.x.x IP
+
+# 資料庫位置
+db_path: /home/dnscheck/data/results.db
+
+# 域名清單檔
+domains_file: config/domains.txt
+
+# 檢測頻率（分鐘）
+check_interval_minutes: 30
+
+# 每條檢測間隔（毫秒）— 避免被限速
+between_check_ms: 200
+
+# Telegram 告警
+telegram_enabled: true
+telegram_bot_token: "YOUR_BOT_TOKEN_HERE"
+telegram_chat_id: "YOUR_CHAT_ID_HERE"
+
+# ISP 清單
+# 每台手機 = 一個 ISP，透過 Tailscale 連到 VPS
+# isp_dns 用該 ISP 公開的預設 DNS（玩家實際會用的）
+isps:
+  # ===== 越南 =====
+  - name: Viettel
+    country: VN
+    socks5_host: 100.64.0.5      # Tailscale 分配給這台手機的 IP
+    socks5_port: 1080
+    isp_dns: 203.113.131.1       # Viettel 預設 DNS
+    expected_org_keywords: ["Viettel", "VIETTEL"]
+  
+  - name: Vinaphone
+    country: VN
+    socks5_host: 100.64.0.6
+    socks5_port: 1080
+    isp_dns: 203.162.4.190       # VNPT/Vinaphone DNS
+    expected_org_keywords: ["VNPT", "Vinaphone"]
+  
+  - name: Mobifone
+    country: VN
+    socks5_host: 100.64.0.7
+    socks5_port: 1080
+    isp_dns: 203.113.188.1       # Mobifone DNS
+    expected_org_keywords: ["Mobifone", "MOBIFONE"]
+  
+  # ===== 菲律賓 =====
+  - name: Globe
+    country: PH
+    socks5_host: 100.64.0.8
+    socks5_port: 1080
+    isp_dns: 203.177.42.214      # Globe DNS
+    expected_org_keywords: ["Globe", "Innove"]
+  
+  - name: Smart
+    country: PH
+    socks5_host: 100.64.0.9
+    socks5_port: 1080
+    isp_dns: 202.57.96.3         # PLDT/Smart DNS
+    expected_org_keywords: ["PLDT", "Smart"]
+  
+  - name: DITO
+    country: PH
+    socks5_host: 100.64.0.10
+    socks5_port: 1080
+    isp_dns: 8.8.8.8             # DITO 沒有公開預設 DNS，先用 Google
+    expected_org_keywords: ["DITO", "Mindanao"]

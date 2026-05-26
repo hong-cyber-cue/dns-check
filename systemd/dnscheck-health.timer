@@ -1,0 +1,10 @@
+[Unit]
+Description=Run DNS Checker Health Check hourly
+Requires=dnscheck-health.service
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
