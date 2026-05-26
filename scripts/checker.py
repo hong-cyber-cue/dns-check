@@ -401,12 +401,16 @@ async def run_round(cfg: dict, domains: list[str]):
     
     log.info(f"開始檢測：{len(domains)} 域名 × {len(cfg['isps'])} ISP")
     
+    # 收集本輪所有結果
+    round_results = []
+    
     for isp_cfg in cfg["isps"]:
         log.info(f"  → 檢測 ISP: {isp_cfg['name']}")
         for domain in domains:
             try:
                 result = await check_one(domain, isp_cfg)
                 save_result(db_path, result)
+                round_results.append(result)
                 
                 change = check_state_change(db_path, result)
                 if change and cfg.get("telegram_enabled"):
@@ -431,6 +435,61 @@ async def run_round(cfg: dict, domains: list[str]):
                 log.error(f"檢測失敗 {domain} @ {isp_cfg['name']}: {e}")
             
             await asyncio.sleep(interval_ms / 1000)
+    
+    # 每輪結束後推送完整報告
+    if cfg.get("telegram_enabled") and round_results:
+        await send_round_report(cfg, round_results)
+
+
+async def send_round_report(cfg: dict, results: list[dict]):
+    """推送本輪完整狀態報告到 Telegram"""
+    from datetime import datetime
+    
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    # 按 ISP 分組
+    by_isp = {}
+    for r in results:
+        by_isp.setdefault(r["isp"], []).append(r)
+    
+    # 統計
+    total = len(results)
+    ok_count = sum(1 for r in results if r["status"] == "ok")
+    blocked_count = sum(1 for r in results if r["status"] == "blocked")
+    unknown_count = sum(1 for r in results if r["status"] in ("unknown", "suspect"))
+    
+    # 狀態圖示
+    icon = {"ok": "✅", "blocked": "🔴", "unknown": "⚪", "suspect": "🟡"}
+    
+    lines = [
+        f"📊 DNS 檢測報告",
+        f"⏰ {now}",
+        f"",
+        f"📈 統計：✅{ok_count}  🔴{blocked_count}  ⚪{unknown_count}  共{total}項",
+        f"",
+    ]
+    
+    for isp_name, isp_results in by_isp.items():
+        country = isp_results[0]["country"]
+        lines.append(f"━━ {isp_name} ({country}) ━━")
+        for r in isp_results:
+            s = icon.get(r["status"], "❓")
+            domain = r["domain"]
+            lines.append(f"{s} {domain}")
+        lines.append("")
+    
+    # 如果有被封的，額外列出詳情
+    blocked = [r for r in results if r["status"] == "blocked"]
+    if blocked:
+        lines.append("⚠️ 被封域名詳情：")
+        for r in blocked:
+            lines.append(f"  🔴 {r['domain']} @ {r['isp']}")
+            lines.append(f"     原因: {r.get('reason')}")
+            if r.get("real_resolved_ip"):
+                lines.append(f"     真實IP: {r['real_resolved_ip']}")
+    
+    msg = "\n".join(lines)
+    await send_alert(cfg, msg, force=True)
 
 
 async def main():

@@ -9,7 +9,7 @@ _recent: dict[str, float] = {}
 _DEDUP_SECONDS = 300
 
 
-async def send_alert(cfg: dict, message: str):
+async def send_alert(cfg: dict, message: str, force: bool = False):
     import time
     token = cfg.get("telegram_bot_token")
     chat_id = cfg.get("telegram_chat_id")
@@ -17,12 +17,13 @@ async def send_alert(cfg: dict, message: str):
         return
     
     now = time.time()
-    # 去重
-    key = message[:100]
-    last = _recent.get(key, 0)
-    if now - last < _DEDUP_SECONDS:
-        return
-    _recent[key] = now
+    # 去重（force=True 時跳過，用於每輪報告）
+    if not force:
+        key = message[:100]
+        last = _recent.get(key, 0)
+        if now - last < _DEDUP_SECONDS:
+            return
+        _recent[key] = now
     
     try:
         async with httpx.AsyncClient(timeout=10) as client:
