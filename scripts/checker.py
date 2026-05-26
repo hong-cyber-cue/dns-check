@@ -442,15 +442,10 @@ async def run_round(cfg: dict, domains: list[str]):
 
 
 async def send_round_report(cfg: dict, results: list[dict]):
-    """推送本輪完整狀態報告到 Telegram"""
+    """推送本輪完整狀態報告到 Telegram，自動分段避免超過 4096 字元限制"""
     from datetime import datetime
     
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
-    # 按 ISP 分組
-    by_isp = {}
-    for r in results:
-        by_isp.setdefault(r["isp"], []).append(r)
     
     # 統計
     total = len(results)
@@ -458,38 +453,62 @@ async def send_round_report(cfg: dict, results: list[dict]):
     blocked_count = sum(1 for r in results if r["status"] == "blocked")
     unknown_count = sum(1 for r in results if r["status"] in ("unknown", "suspect"))
     
-    # 狀態圖示
-    icon = {"ok": "✅", "blocked": "🔴", "unknown": "⚪", "suspect": "🟡"}
+    # 第 1 條：統計摘要 + 被封域名詳情
+    blocked = [r for r in results if r["status"] == "blocked"]
+    unknown = [r for r in results if r["status"] in ("unknown", "suspect")]
     
     lines = [
         f"📊 DNS 檢測報告",
         f"⏰ {now}",
         f"",
         f"📈 統計：✅{ok_count}  🔴{blocked_count}  ⚪{unknown_count}  共{total}項",
-        f"",
     ]
+    
+    if blocked:
+        lines.append("")
+        lines.append("⚠️ 被封域名：")
+        for r in blocked:
+            lines.append(f"  🔴 {r['domain']} @ {r['isp']}")
+            if r.get("real_resolved_ip"):
+                lines.append(f"     真實IP: {r['real_resolved_ip']}")
+    else:
+        lines.append("")
+        lines.append("✅ 沒有域名被封鎖")
+    
+    if unknown:
+        lines.append("")
+        lines.append("⚪ 無記錄域名：")
+        for r in unknown:
+            lines.append(f"  {r['domain']}")
+    
+    await send_alert(cfg, "\n".join(lines), force=True)
+    
+    # 第 2 條起：完整域名清單，分段發送
+    icon = {"ok": "✅", "blocked": "🔴", "unknown": "⚪", "suspect": "🟡"}
+    
+    by_isp = {}
+    for r in results:
+        by_isp.setdefault(r["isp"], []).append(r)
     
     for isp_name, isp_results in by_isp.items():
         country = isp_results[0]["country"]
-        lines.append(f"━━ {isp_name} ({country}) ━━")
-        for r in isp_results:
-            s = icon.get(r["status"], "❓")
-            domain = r["domain"]
-            lines.append(f"{s} {domain}")
-        lines.append("")
-    
-    # 如果有被封的，額外列出詳情
-    blocked = [r for r in results if r["status"] == "blocked"]
-    if blocked:
-        lines.append("⚠️ 被封域名詳情：")
-        for r in blocked:
-            lines.append(f"  🔴 {r['domain']} @ {r['isp']}")
-            lines.append(f"     原因: {r.get('reason')}")
-            if r.get("real_resolved_ip"):
-                lines.append(f"     真實IP: {r['real_resolved_ip']}")
-    
-    msg = "\n".join(lines)
-    await send_alert(cfg, msg, force=True)
+        
+        # 每 50 個域名一段
+        chunks = [isp_results[i:i+50] for i in range(0, len(isp_results), 50)]
+        
+        for idx, chunk in enumerate(chunks):
+            chunk_lines = []
+            if idx == 0:
+                chunk_lines.append(f"━━ {isp_name} ({country}) ━━")
+            else:
+                chunk_lines.append(f"━━ {isp_name} 續 ({idx+1}/{len(chunks)}) ━━")
+            
+            for r in chunk:
+                s = icon.get(r["status"], "❓")
+                chunk_lines.append(f"{s} {r['domain']}")
+            
+            await send_alert(cfg, "\n".join(chunk_lines), force=True)
+            await asyncio.sleep(0.5)  # 避免 Telegram rate limit
 
 
 async def main():
