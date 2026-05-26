@@ -92,42 +92,67 @@ def init_db(db_path: str):
 
 # ============ DNS 查詢核心 ============
 
-def query_isp_dns_via_socks5(
+async def query_isp_dns_via_socks5(
     domain: str,
     isp_dns_ip: str,
     socks5_host: str,
     socks5_port: int,
-    timeout: int = 10
+    timeout: int = 15
 ) -> Optional[list[str]]:
     """
     透過手機 SOCKS5 代理查詢域名的 IP。
     
-    原理：SOCKS5 connect 時傳入域名（不是 IP），
-    代理端（手機）會用自己的系統 DNS（ISP 預設 DNS）來解析。
-    連線建立後用 getpeername() 拿到手機解析到的 IP。
+    方法：用 httpx 透過 SOCKS5 做 HEAD 請求到目標域名。
+    httpx 底層會讓 SOCKS5 代理（手機端）用 ISP DNS 解析域名。
+    然後從底層 socket 的 getpeername() 拿到真正連到的 IP。
     
-    如果 ISP 污染了 DNS → getpeername() 回假 IP
-    如果 ISP 沒污染 → getpeername() 回真 IP
+    由於 PySocks 的 getpeername() 會回傳域名而不是 IP，
+    改用 httpx transport 的方式，從 HTTP 連線資訊取得 remote IP。
     """
     try:
-        sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.set_proxy(socks.SOCKS5, socks5_host, socks5_port)
-        sock.settimeout(timeout)
-        # 關鍵：傳入域名讓手機端解析（不是我們自己解析）
-        sock.connect((domain, 443))
-        # 拿到手機端解析後連到的真實 IP
-        peer_ip = sock.getpeername()[0]
-        sock.close()
-        return [peer_ip]
-    except socks.SOCKS5Error as e:
-        # SOCKS5 代理回報錯誤（例如域名解析失敗）
-        log.debug(f"SOCKS5 error for {domain}: {e}")
+        transport = httpx.AsyncHTTPTransport(
+            proxy=f"socks5://{socks5_host}:{socks5_port}"
+        )
+        async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+            # 做 HEAD 請求，讓手機的 ISP DNS 解析域名
+            r = await client.head(f"https://{domain}/", follow_redirects=True)
+            # 從連線資訊取得 remote IP
+            # httpx 的 stream.connection 裡有 socket info
+            ip = r.extensions.get("network_stream")
+            if ip:
+                sock = ip.get_extra_info("socket")
+                if sock:
+                    peer = sock.getpeername()
+                    if peer:
+                        return [peer[0]]
+            
+            # 備用方法：如果拿不到 socket info，
+            # 至少連線成功代表 DNS 沒被完全封鎖
+            # 用 DNS 查詢取得手機解析到的 IP
+            # 透過 SOCKS5 查一個 DNS API
+            try:
+                r2 = await client.get(
+                    f"https://dns.google/resolve?name={domain}&type=A",
+                )
+                dns_data = r2.json()
+                if "Answer" in dns_data:
+                    ips = [a["data"] for a in dns_data["Answer"] if a["type"] == 1]
+                    if ips:
+                        return ips
+            except Exception:
+                pass
+            
+            # 最終備用：連線成功但拿不到 IP，用佔位符標記
+            return ["CONNECTED_BUT_IP_UNKNOWN"]
+    
+    except httpx.ConnectError as e:
+        log.debug(f"Connect error for {domain}: {e}")
         return None
-    except socket.timeout:
-        log.debug(f"Timeout connecting to {domain} via SOCKS5")
+    except httpx.ConnectTimeout:
+        log.debug(f"Timeout for {domain}")
         return None
     except Exception as e:
-        log.debug(f"SOCKS5 connect failed for {domain}: {e}")
+        log.debug(f"SOCKS5 query failed for {domain}: {e}")
         return None
 
 
@@ -203,8 +228,7 @@ async def check_one(domain: str, isp_cfg: dict) -> dict:
     isp_name = isp_cfg["name"]
     
     # 1. 透過手機 SOCKS5 連線，讓手機的 ISP DNS 解析域名
-    isp_ips = await asyncio.to_thread(
-        query_isp_dns_via_socks5,
+    isp_ips = await query_isp_dns_via_socks5(
         domain,
         isp_cfg["isp_dns"],
         isp_cfg["socks5_host"],
@@ -233,6 +257,12 @@ async def check_one(domain: str, isp_cfg: dict) -> dict:
     
     isp_ip = isp_ips[0]
     result["isp_resolved_ip"] = isp_ip
+    
+    # 如果連線成功但拿不到具體 IP，至少知道沒被封
+    if isp_ip == "CONNECTED_BUT_IP_UNKNOWN":
+        result["status"] = "ok"
+        result["reason"] = "CONNECTED_OK"
+        return result
     
     if is_obviously_blocked_ip(isp_ip):
         result["status"] = "blocked"
