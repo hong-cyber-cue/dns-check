@@ -392,6 +392,21 @@ def check_state_change(db_path: str, result: dict) -> Optional[str]:
     return f"{last} → {current}"
 
 
+# ============ 連線預檢 ============
+
+async def check_socks5_alive(socks5_host: str, socks5_port: int, timeout: int = 5) -> bool:
+    """測試 SOCKS5 代理是否能連上"""
+    try:
+        transport = httpx.AsyncHTTPTransport(
+            proxy=f"socks5://{socks5_host}:{socks5_port}"
+        )
+        async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+            r = await client.get("https://ipinfo.io/json")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
 # ============ 主迴圈 ============
 
 async def run_round(cfg: dict, domains: list[str]):
@@ -403,9 +418,22 @@ async def run_round(cfg: dict, domains: list[str]):
     
     # 收集本輪所有結果
     round_results = []
+    skipped_isps = []
     
     for isp_cfg in cfg["isps"]:
-        log.info(f"  → 檢測 ISP: {isp_cfg['name']}")
+        isp_name = isp_cfg["name"]
+        
+        # 預檢：先測 SOCKS5 是否能連
+        log.info(f"  → 預檢 {isp_name} SOCKS5 ({isp_cfg['socks5_host']}:{isp_cfg['socks5_port']})...")
+        alive = await check_socks5_alive(isp_cfg["socks5_host"], isp_cfg["socks5_port"])
+        
+        if not alive:
+            log.warning(f"  ❌ {isp_name} 手機斷線，跳過本輪檢測")
+            skipped_isps.append(isp_cfg)
+            continue
+        
+        log.info(f"  ✅ {isp_name} 連線正常，開始檢測")
+        
         for domain in domains:
             try:
                 result = await check_one(domain, isp_cfg)
@@ -432,85 +460,131 @@ async def run_round(cfg: dict, domains: list[str]):
                     f"reason={result.get('reason')}"
                 )
             except Exception as e:
-                log.error(f"檢測失敗 {domain} @ {isp_cfg['name']}: {e}")
+                log.error(f"檢測失敗 {domain} @ {isp_name}: {e}")
             
             await asyncio.sleep(interval_ms / 1000)
     
+    # 推送斷線告警
+    if skipped_isps and cfg.get("telegram_enabled"):
+        for isp_cfg in skipped_isps:
+            msg = (
+                f"📵 {isp_cfg['name']} ({isp_cfg['country']}) 手機斷線\n"
+                f"SOCKS5 {isp_cfg['socks5_host']}:{isp_cfg['socks5_port']} 無回應\n"
+                f"本輪已跳過該 ISP 的檢測\n"
+                f"請檢查：\n"
+                f"  • Tailscale 是否在線\n"
+                f"  • Every Proxy 是否在跑\n"
+                f"  • SIM 卡是否有訊號"
+            )
+            await send_alert(cfg, msg, force=True)
+    
     # 每輪結束後推送完整報告
-    if cfg.get("telegram_enabled") and round_results:
-        await send_round_report(cfg, round_results)
+    if cfg.get("telegram_enabled"):
+        await send_round_report(cfg, round_results, skipped_isps)
 
 
-async def send_round_report(cfg: dict, results: list[dict]):
-    """推送本輪完整狀態報告到 Telegram，分三類：被封、無記錄、正常"""
+async def send_round_report(cfg: dict, results: list[dict], skipped_isps: list = None):
+    """推送本輪完整狀態報告到 Telegram，按 ISP 分開顯示，含斷線偵測"""
     from datetime import datetime
     
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if skipped_isps is None:
+        skipped_isps = []
     
-    # 分類
-    blocked = [r for r in results if r["status"] == "blocked"]
-    unknown = [r for r in results if r["status"] in ("unknown", "suspect")]
-    ok_list = [r for r in results if r["status"] == "ok"]
-    
+    # 總統計
     total = len(results)
+    ok_total = sum(1 for r in results if r["status"] == "ok")
+    blocked_total = sum(1 for r in results if r["status"] == "blocked")
+    unknown_total = sum(1 for r in results if r["status"] in ("unknown", "suspect"))
     
-    # 第 1 條：摘要 + 被封域名
-    lines = [
+    # 第 1 條：總摘要
+    summary = [
         f"📊 DNS 檢測報告",
         f"⏰ {now}",
-        f"📈 統計：✅{len(ok_list)}  🔴{len(blocked)}  ⚪{len(unknown)}  共{total}項",
+        f"📈 統計：✅{ok_total}  🔴{blocked_total}  ⚪{unknown_total}  共{total}項",
     ]
+    if skipped_isps:
+        names = ", ".join(i["name"] for i in skipped_isps)
+        summary.append(f"📵 斷線跳過：{names}")
     
-    if blocked:
-        lines.append("")
-        lines.append(f"⚠️ 被封域名（{len(blocked)}）：")
-        for r in blocked:
-            lines.append(f"🔴 {r['domain']}")
-    else:
-        lines.append("")
-        lines.append("✅ 沒有域名被封鎖")
+    await send_alert(cfg, "\n".join(summary), force=True)
+    await asyncio.sleep(0.5)
     
-    if unknown:
-        lines.append("")
-        lines.append(f"⚪ 無記錄域名（{len(unknown)}）：")
-        for r in unknown:
-            lines.append(f"⚪ {r['domain']}")
+    # 按 ISP 分組
+    by_isp = {}
+    for r in results:
+        by_isp.setdefault(r["isp"], []).append(r)
     
-    msg1 = "\n".join(lines)
-    # 如果第一條太長也要拆
-    if len(msg1) > 4000:
-        # 先發摘要
-        await send_alert(cfg, "\n".join(lines[:4]), force=True)
-        await asyncio.sleep(0.3)
-        # 再發被封清單
-        if blocked:
-            blocked_lines = [f"⚠️ 被封域名（{len(blocked)}）："]
-            for r in blocked:
-                blocked_lines.append(f"🔴 {r['domain']}")
-            await send_alert(cfg, "\n".join(blocked_lines), force=True)
-            await asyncio.sleep(0.3)
-        if unknown:
-            unknown_lines = [f"⚪ 無記錄域名（{len(unknown)}）："]
-            for r in unknown:
-                unknown_lines.append(f"⚪ {r['domain']}")
-            await send_alert(cfg, "\n".join(unknown_lines), force=True)
-            await asyncio.sleep(0.3)
-    else:
-        await send_alert(cfg, msg1, force=True)
-        await asyncio.sleep(0.3)
-    
-    # 第 2 條起：正常域名清單，分段發送
-    if ok_list:
-        chunks = [ok_list[i:i+50] for i in range(0, len(ok_list), 50)]
-        for idx, chunk in enumerate(chunks):
-            chunk_lines = []
-            if idx == 0:
-                chunk_lines.append(f"✅ 正常域名（{len(ok_list)}）：")
-            else:
-                chunk_lines.append(f"✅ 正常域名 續 ({idx+1}/{len(chunks)})：")
-            for r in chunk:
-                chunk_lines.append(f"✅ {r['domain']}")
-            await send_alert(cfg, "\n".join(chunk_lines), force=True)
+    # 每個 ISP 發獨立報告
+    for isp_name, isp_results in by_isp.items():
+        country = isp_results[0]["country"]
+        blocked = [r for r in isp_results if r["status"] == "blocked"]
+        unknown = [r for r in isp_results if r["status"] in ("unknown", "suspect")]
+        ok_list = [r for r in isp_results if r["status"] == "ok"]
+        
+        # 斷線偵測：如果 ok 數量為 0 且 blocked 佔 90% 以上，很可能手機斷線
+        total_isp = len(isp_results)
+        blocked_pct = len(blocked) / total_isp * 100 if total_isp > 0 else 0
+        phone_offline = len(ok_list) == 0 and blocked_pct > 90
+        
+        lines = [f"━━ {isp_name} ({country}) ━━"]
+        
+        if phone_offline:
+            lines.append("")
+            lines.append(f"📵 手機可能斷線！")
+            lines.append(f"所有 {len(blocked)} 個域名都無法連線")
+            lines.append(f"請檢查 {isp_name} 手機的：")
+            lines.append(f"  • Tailscale 是否在線")
+            lines.append(f"  • Every Proxy 是否在跑")
+            lines.append(f"  • SIM 卡是否有訊號")
+        else:
+            # 被封域名
+            if blocked:
+                lines.append(f"⚠️ 被封（{len(blocked)}）：")
+                for r in blocked:
+                    lines.append(f"🔴 {r['domain']}")
+            
+            # 無記錄域名
+            if unknown:
+                lines.append(f"⚪ 無記錄（{len(unknown)}）：")
+                for r in unknown:
+                    lines.append(f"⚪ {r['domain']}")
+            
+            # 正常域名
+            if ok_list:
+                lines.append(f"✅ 正常（{len(ok_list)}）")
+            
+            if not blocked:
+                lines.append("✅ 沒有域名被封鎖")
+        
+        # 如果太長就拆
+        msg = "\n".join(lines)
+        if len(msg) > 4000:
+            # 先發被封
+            header = [f"━━ {isp_name} ({country}) ━━"]
+            if phone_offline:
+                header.append(f"📵 手機可能斷線！所有域名無法連線，請檢查手機狀態")
+            elif blocked:
+                header.append(f"⚠️ 被封（{len(blocked)}）：")
+                for r in blocked:
+                    header.append(f"🔴 {r['domain']}")
+            await send_alert(cfg, "\n".join(header), force=True)
+            await asyncio.sleep(0.5)
+            
+            # 再發無記錄 + 正常統計
+            if not phone_offline:
+                footer = []
+                if unknown:
+                    footer.append(f"⚪ 無記錄（{len(unknown)}）：")
+                    for r in unknown:
+                        footer.append(f"⚪ {r['domain']}")
+                if ok_list:
+                    footer.append(f"✅ 正常（{len(ok_list)}）")
+                if footer:
+                    await send_alert(cfg, "\n".join(footer), force=True)
+                    await asyncio.sleep(0.5)
+        else:
+            await send_alert(cfg, msg, force=True)
             await asyncio.sleep(0.5)
 
 
