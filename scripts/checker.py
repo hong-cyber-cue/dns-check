@@ -550,17 +550,12 @@ async def send_round_report(cfg: dict, results: list[dict], skipped_isps: list =
                 for r in unknown:
                     lines.append(f"⚪ {r['domain']}")
             
-            # 正常域名
-            if ok_list:
-                lines.append(f"✅ 正常（{len(ok_list)}）")
-            
             if not blocked:
                 lines.append("✅ 沒有域名被封鎖")
         
-        # 如果太長就拆
+        # 發送被封 + 無記錄部分
         msg = "\n".join(lines)
         if len(msg) > 4000:
-            # 先發被封
             header = [f"━━ {isp_name} ({country}) ━━"]
             if phone_offline:
                 header.append(f"📵 手機可能斷線！所有域名無法連線，請檢查手機狀態")
@@ -571,21 +566,29 @@ async def send_round_report(cfg: dict, results: list[dict], skipped_isps: list =
             await send_alert(cfg, "\n".join(header), force=True)
             await asyncio.sleep(0.5)
             
-            # 再發無記錄 + 正常統計
-            if not phone_offline:
-                footer = []
-                if unknown:
-                    footer.append(f"⚪ 無記錄（{len(unknown)}）：")
-                    for r in unknown:
-                        footer.append(f"⚪ {r['domain']}")
-                if ok_list:
-                    footer.append(f"✅ 正常（{len(ok_list)}）")
-                if footer:
-                    await send_alert(cfg, "\n".join(footer), force=True)
-                    await asyncio.sleep(0.5)
+            if not phone_offline and unknown:
+                unknown_lines = [f"⚪ 無記錄（{len(unknown)}）："]
+                for r in unknown:
+                    unknown_lines.append(f"⚪ {r['domain']}")
+                await send_alert(cfg, "\n".join(unknown_lines), force=True)
+                await asyncio.sleep(0.5)
         else:
             await send_alert(cfg, msg, force=True)
             await asyncio.sleep(0.5)
+        
+        # 正常域名清單，獨立分段發送
+        if ok_list and not phone_offline:
+            chunks = [ok_list[i:i+50] for i in range(0, len(ok_list), 50)]
+            for idx, chunk in enumerate(chunks):
+                ok_lines = []
+                if idx == 0:
+                    ok_lines.append(f"✅ {isp_name} 正常（{len(ok_list)}）：")
+                else:
+                    ok_lines.append(f"✅ {isp_name} 正常 續 ({idx+1}/{len(chunks)})：")
+                for r in chunk:
+                    ok_lines.append(f"✅ {r['domain']}")
+                await send_alert(cfg, "\n".join(ok_lines), force=True)
+                await asyncio.sleep(0.5)
 
 
 async def main():
